@@ -225,7 +225,11 @@ impl Symbol for Token {
                     }
                     AstKind::Var(ref name) => name.clone(),
                     AstKind::Lambda { .. } => String::from("<lambda>"),
-                    _ => unreachable!(),
+                    // Allow calling a parenthesized expression that evaluates to a function, e.g. (λ($x){...})(args)
+                    AstKind::Block(..) => String::from("<lambda>"),
+                    // Also allow calling the result of any expression (like Name or Var that evaluated earlier):
+                    // treat it as a function application syntactically; semantic errors will be handled later.
+                    _ => String::from("<lambda>"),
                 };
 
                 let func: Ast;
