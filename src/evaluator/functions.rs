@@ -280,6 +280,8 @@ pub fn fn_filter<'a>(
     Ok(result)
 }
 
+// (removed duplicate single implementation)
+
 pub fn fn_each<'a>(
     context: FunctionContext<'a, '_>,
     args: &[&'a Value<'a>],
@@ -306,9 +308,18 @@ pub fn fn_each<'a>(
     let result = Value::array(context.arena, ArrayFlags::SEQUENCE);
 
     for (key, value) in obj.entries() {
-        let key = Value::string(context.arena, key);
+        // Provide up to arity arguments: ($v), ($v,$k), ($v,$o)
+        let arity = func.arity();
+        let mut call_args: Vec<&'a Value<'a>> = Vec::with_capacity(arity);
+        call_args.push(value);
+        if arity >= 2 {
+            call_args.push(Value::string(context.arena, key));
+        }
+        if arity >= 3 {
+            call_args.push(obj);
+        }
 
-        let mapped = context.evaluate_function(func, &[value, key])?;
+        let mapped = context.trampoline_evaluate_value(context.evaluate_function(func, &call_args)?)?;
         if !mapped.is_undefined() {
             result.push(mapped);
         }
@@ -444,6 +455,7 @@ pub fn fn_substring_before<'a>(
     context: FunctionContext<'a, '_>,
     args: &[&'a Value<'a>],
 ) -> Result<&'a Value<'a>> {
+    max_args!(context, args, 2);
     let string = args.first().copied().unwrap_or_else(Value::undefined);
 
     let chars = args.get(1).copied().unwrap_or_else(Value::undefined);
@@ -452,8 +464,18 @@ pub fn fn_substring_before<'a>(
         return Ok(Value::undefined());
     }
 
+    if chars.is_undefined() {
+        return Err(Error::T0411ContextValueNotCompatible(
+            context.char_index,
+            2,
+            context.name.to_string(),
+        ));
+    }
+
     if !chars.is_string() {
-        return Err(Error::D3010EmptyPattern(context.char_index));
+        // JSONata: non-string second arg is a type error, but if expression created string at runtime
+        // and became empty, raise D3010. Here we only know it's not string -> T0410
+        return Err(Error::T0410ArgumentNotValid(context.char_index, 2, context.name.to_string()));
     }
 
     let string: &str = &string.as_str();
@@ -470,6 +492,7 @@ pub fn fn_substring_after<'a>(
     context: FunctionContext<'a, '_>,
     args: &[&'a Value<'a>],
 ) -> Result<&'a Value<'a>> {
+    max_args!(context, args, 2);
     let string = args.first().copied().unwrap_or_else(Value::undefined);
 
     let chars = args.get(1).copied().unwrap_or_else(Value::undefined);
@@ -478,8 +501,16 @@ pub fn fn_substring_after<'a>(
         return Ok(Value::undefined());
     }
 
+    if chars.is_undefined() {
+        return Err(Error::T0411ContextValueNotCompatible(
+            context.char_index,
+            2,
+            context.name.to_string(),
+        ));
+    }
+
     if !chars.is_string() {
-        return Err(Error::D3010EmptyPattern(context.char_index));
+        return Err(Error::T0410ArgumentNotValid(context.char_index, 2, context.name.to_string()));
     }
 
     let string: &str = &string.as_str();
@@ -511,6 +542,7 @@ pub fn fn_lowercase<'a>(
     context: FunctionContext<'a, '_>,
     args: &[&'a Value<'a>],
 ) -> Result<&'a Value<'a>> {
+    max_args!(context, args, 1);
     let arg = args.first().copied().unwrap_or_else(Value::undefined);
 
     Ok(if !arg.is_string() {
@@ -524,6 +556,7 @@ pub fn fn_uppercase<'a>(
     context: FunctionContext<'a, '_>,
     args: &[&'a Value<'a>],
 ) -> Result<&'a Value<'a>> {
+    max_args!(context, args, 1);
     let arg = args.first().copied().unwrap_or_else(Value::undefined);
 
     if !arg.is_string() {
@@ -566,6 +599,7 @@ pub fn fn_substring<'a>(
     context: FunctionContext<'a, '_>,
     args: &[&'a Value<'a>],
 ) -> Result<&'a Value<'a>> {
+    max_args!(context, args, 3);
     let string = args.first().copied().unwrap_or_else(Value::undefined);
     let start = args.get(1).copied().unwrap_or_else(Value::undefined);
     let length = args.get(2).copied().unwrap_or_else(Value::undefined);
@@ -603,18 +637,10 @@ pub fn fn_substring<'a>(
         if length < 0 {
             Ok(Value::string(context.arena, ""))
         } else {
-            let end = if start >= 0 {
-                (start + length) as usize
-            } else {
-                (len + start + length) as usize
-            };
-
-            let substring = string
-                .chars()
-                .skip(start as usize)
-                .take(end - start as usize)
-                .collect::<String>();
-
+            let end = if start >= 0 { start + length } else { len + start + length };
+            let start_idx = start.max(0) as usize;
+            let end_idx = end.max(0) as usize;
+            let substring = string.chars().skip(start_idx).take(end_idx.saturating_sub(start_idx)).collect::<String>();
             Ok(Value::string(context.arena, &substring))
         }
     }
@@ -1635,12 +1661,20 @@ pub fn single<'a>(
         let mut result: Option<&'a Value<'a>> = None;
 
         for (index, entry) in elements.iter().enumerate() {
-            let res = context.evaluate_function(
-                func,
-                &[entry, Value::number(context.arena, index as f64), arr],
-            )?;
+            let arity = func.arity();
+            let mut call_args: Vec<&'a Value<'a>> = Vec::with_capacity(arity);
+            call_args.push(entry);
+            if arity >= 2 {
+                call_args.push(Value::number(context.arena, index as f64));
+            }
+            if arity >= 3 {
+                call_args.push(arr);
+            }
+            let res = context.evaluate_function(func, &call_args)?;
 
-            if res.as_bool() {
+            // Coerce predicate result to boolean per $boolean semantics
+            let res_bool = fn_boolean(context.clone(), &[res])?.as_bool();
+            if res_bool {
                 if result.is_some() {
                     return Err(Error::D3138Error(format!(
                         "More than one value matched the predicate at index {}",
@@ -2073,11 +2107,13 @@ pub fn fn_reduce<'a>(
         1
     };
 
-    for (index, value) in elements[start_index..].iter().enumerate() {
-        let index_value = Value::number(context.arena, index as f64);
+    for (offset, value) in elements[start_index..].iter().enumerate() {
+        let index_value = Value::number(context.arena, (start_index + offset) as f64);
 
-        let result =
-            context.evaluate_function(func, &[accumulator, value, index_value, original_value]);
+        let result = context.evaluate_function(
+            func,
+            &[accumulator, value, index_value, original_value],
+        );
 
         match result {
             Ok(new_accumulator) => {

@@ -118,6 +118,7 @@ impl<'a> Evaluator<'a> {
                 input,
                 name,
             ),
+            AstKind::PartialArg => input,
             AstKind::Lambda { .. } => Value::lambda(self.arena, node, input, frame.clone()),
             AstKind::Function {
                 ref proc,
@@ -144,6 +145,14 @@ impl<'a> Evaluator<'a> {
                 if let AstKind::Filter(ref expr) = filter.kind {
                     result = self.evaluate_filter(expr, result, frame)?
                 }
+            }
+        }
+
+        // Apply object-constructor grouping on the result if present,
+        // but skip here for Path nodes since evaluate_path already handles it
+        if !matches!(node.kind, AstKind::Path(_)) {
+            if let Some((char_index, ref object)) = node.group_by {
+                result = self.evaluate_group_expression(char_index, object, result, frame)?;
             }
         }
 
@@ -558,6 +567,32 @@ impl<'a> Evaluator<'a> {
             )),
 
             BinaryOp::Apply => {
+                // Function-to-function: compose
+                if lhs.is_function() {
+                    // Evaluate RHS to a function value
+                    let rhs_val = match rhs_ast.kind {
+                        AstKind::Function { .. } => self.evaluate(rhs_ast, input, frame)?,
+                        _ => self.evaluate(rhs_ast, input, frame)?,
+                    };
+                    if !rhs_val.is_function() {
+                        return Err(Error::T2006RightSideNotFunction(rhs_ast.char_index));
+                    }
+
+                    let chain = self.evaluate(
+                        self.chain_ast.as_ref().unwrap(),
+                        Value::undefined(),
+                        frame,
+                    )?;
+                    return Ok(self.apply_function(
+                        lhs_ast.char_index,
+                        Value::undefined(),
+                        chain,
+                        &[lhs, rhs_val],
+                        frame,
+                    )?);
+                }
+
+                // Value-to-function: apply
                 if let AstKind::Function {
                     ref proc,
                     ref args,
@@ -565,57 +600,36 @@ impl<'a> Evaluator<'a> {
                     ..
                 } = rhs_ast.kind
                 {
-                    // Function invocation with lhs as the first argument
-                    Ok(self.evaluate_function(input, proc, args, is_partial, frame, Some(lhs))?)
-                } else {
-                    let rhs = self.evaluate(rhs_ast, input, frame)?;
-
-                    if !rhs.is_function() {
-                        // JSONata allows regex on RHS of ~> as a predicate test against LHS
-                        if let Value::Regex(ref regex_literal) = rhs {
-                            let hay = if lhs.is_string() {
-                                lhs.as_str().into_owned()
-                            } else if lhs.is_undefined() {
-                                String::new()
-                            } else {
-                                fn_string(
-                                    self.fn_context("string", node.char_index, input, frame),
-                                    &[lhs],
-                                )?
-                                .as_str()
-                                .into_owned()
-                            };
-                            let is_match = regex_literal.get_regex().find_iter(&hay).next().is_some();
-                            return Ok(Value::bool(is_match));
-                        }
-                        return Err(Error::T2006RightSideNotFunction(rhs_ast.char_index));
-                    }
-
-                    if lhs.is_function() {
-                        // Apply function chaining
-                        let chain = self.evaluate(
-                            self.chain_ast.as_ref().unwrap(),
-                            Value::undefined(),
-                            frame,
-                        )?;
-
-                        Ok(self.apply_function(
-                            lhs_ast.char_index,
-                            Value::undefined(),
-                            chain,
-                            &[lhs, rhs],
-                            frame,
-                        )?)
-                    } else {
-                        Ok(self.apply_function(
-                            rhs_ast.char_index,
-                            Value::undefined(),
-                            rhs,
-                            &[lhs],
-                            frame,
-                        )?)
-                    }
+                    return Ok(self.evaluate_function(input, proc, args, is_partial, frame, Some(lhs))?);
                 }
+
+                let rhs = self.evaluate(rhs_ast, input, frame)?;
+                if !rhs.is_function() {
+                    if let Value::Regex(ref regex_literal) = rhs {
+                        let hay = if lhs.is_string() {
+                            lhs.as_str().into_owned()
+                        } else if lhs.is_undefined() {
+                            String::new()
+                        } else {
+                            fn_string(
+                                self.fn_context("string", node.char_index, input, frame),
+                                &[lhs],
+                            )?
+                            .as_str()
+                            .into_owned()
+                        };
+                        let is_match = regex_literal.get_regex().find_iter(&hay).next().is_some();
+                        return Ok(Value::bool(is_match));
+                    }
+                    return Err(Error::T2006RightSideNotFunction(rhs_ast.char_index));
+                }
+                Ok(self.apply_function(
+                    rhs_ast.char_index,
+                    Value::undefined(),
+                    rhs,
+                    &[lhs],
+                    frame,
+                )?)
             }
 
             BinaryOp::In => {
@@ -927,8 +941,7 @@ impl<'a> Evaluator<'a> {
         let is_tuple_sort = input.has_flags(ArrayFlags::TUPLE_STREAM);
 
         let comp = |a: &'a Value<'a>, b: &'a Value<'a>| {
-            let mut result = 0;
-
+            // Compare across sort terms; return as soon as one term orders the pair
             for (sort_term, descending) in sort_terms {
                 let aa = if is_tuple_sort {
                     let tuple_frame = Frame::from_tuple(frame, a);
@@ -944,38 +957,37 @@ impl<'a> Evaluator<'a> {
                     self.evaluate(sort_term, b, frame)?
                 };
 
-                if aa.is_undefined() {
-                    result = if bb.is_undefined() { 0 } else { 1 };
+                // Undefineds sort last
+                if aa.is_undefined() && bb.is_undefined() {
                     continue;
-                }
-
-                if bb.is_undefined() {
-                    result = -1;
-                    continue;
+                } else if aa.is_undefined() {
+                    // aa > bb so that undefined comes after defined
+                    let ordered = true;
+                    return Ok(if *descending { !ordered } else { ordered });
+                } else if bb.is_undefined() {
+                    let ordered = false; // aa < bb
+                    return Ok(if *descending { !ordered } else { ordered });
                 }
 
                 if !(aa.is_string() || aa.is_number()) || !(bb.is_string() || bb.is_number()) {
                     return Err(Error::T2008InvalidOrderBy(char_index));
                 }
 
+                let mut cmp_result = 0; // -1 if aa < bb, 1 if aa > bb, 0 if equal
                 match (aa, bb) {
-                    (Value::String(a), Value::String(b)) if *a == *b => {
-                        continue;
+                    (Value::String(a), Value::String(b)) => {
+                        if *a < *b {
+                            cmp_result = -1;
+                        } else if *a > *b {
+                            cmp_result = 1;
+                        }
                     }
-                    (Value::String(a), Value::String(b)) if *a < *b => {
-                        result = -1;
-                    }
-                    (Value::String(..), Value::String(..)) => {
-                        result = 1;
-                    }
-                    (Value::Number(a), Value::Number(b)) if *a == *b => {
-                        continue;
-                    }
-                    (Value::Number(a), Value::Number(b)) if *a < *b => {
-                        result = -1;
-                    }
-                    (Value::Number(..), Value::Number(..)) => {
-                        result = 1;
+                    (Value::Number(a), Value::Number(b)) => {
+                        if *a < *b {
+                            cmp_result = -1;
+                        } else if *a > *b {
+                            cmp_result = 1;
+                        }
                     }
                     _ => {
                         return Err(Error::T2007CompareTypeMismatch(
@@ -984,14 +996,19 @@ impl<'a> Evaluator<'a> {
                             b.to_string(),
                         ));
                     }
-                };
-
-                if *descending {
-                    result = -result;
                 }
-            }
 
-            Ok(result == 1)
+                if cmp_result != 0 {
+                    if *descending {
+                        cmp_result = -cmp_result;
+                    }
+                    // Return true if left should come after right
+                    return Ok(cmp_result == 1);
+                }
+                // else: equal on this term, continue to next term
+            }
+            // All terms equal: keep original order (stable)
+            Ok(false)
         };
 
         let sorted = merge_sort(unsorted, &comp)?;
@@ -1178,10 +1195,51 @@ impl<'a> Evaluator<'a> {
         input: &'a Value<'a>,
         proc: &Ast,
         args: &[Ast],
-        _is_partial: bool,
+        is_partial: bool,
         frame: &Frame<'a>,
         context: Option<&'a Value<'a>>,
     ) -> Result<&'a Value<'a>> {
+        // If this is a partial application with no pipeline/context value, return a lambda
+        // that accepts a single argument and substitutes it into the placeholder positions.
+        if is_partial && context.is_none() {
+            let param_name = "$x".to_string();
+            // Build parameter var AST
+            let param_var = Ast::new(AstKind::Var(param_name.clone()), proc.char_index);
+            // Replace PartialArg with param var
+            let mut replaced_args: Vec<Ast> = Vec::with_capacity(args.len());
+            for a in args.iter() {
+                if matches!(a.kind, AstKind::PartialArg) {
+                    replaced_args.push(Ast::new(
+                        AstKind::Var(param_name.clone()),
+                        a.char_index,
+                    ));
+                } else {
+                    replaced_args.push(a.clone());
+                }
+            }
+            // Build inner function AST with placeholders removed
+            let inner_func = Ast::new(
+                AstKind::Function {
+                    name: String::from("<partial>"),
+                    proc: Box::new(proc.clone()),
+                    args: replaced_args,
+                    is_partial: false,
+                },
+                proc.char_index,
+            );
+            // Build lambda AST that takes one argument and evaluates inner function
+            let lambda_ast = Ast::new(
+                AstKind::Lambda {
+                    name: String::from("<partial>"),
+                    args: vec![param_var],
+                    body: Box::new(inner_func),
+                    thunk: false,
+                },
+                proc.char_index,
+            );
+            return Ok(Value::lambda(self.arena, &lambda_ast, input, frame.clone()));
+        }
+
         let evaluated_proc = self.evaluate(proc, input, frame)?;
 
         // Help the user out if they forgot a '$'
@@ -1204,9 +1262,19 @@ impl<'a> Evaluator<'a> {
             evaluated_args.push(context);
         }
 
-        for arg in args {
-            let arg = self.evaluate(arg, input, frame)?;
-            evaluated_args.push(arg);
+        if is_partial {
+            // In partials, replace any PartialArg with current input value
+            for arg in args {
+                match arg.kind {
+                    AstKind::PartialArg => evaluated_args.push(input),
+                    _ => evaluated_args.push(self.evaluate(arg, input, frame)?),
+                }
+            }
+        } else {
+            for arg in args {
+                let arg = self.evaluate(arg, input, frame)?;
+                evaluated_args.push(arg);
+            }
         }
 
         let result = self.apply_function(
