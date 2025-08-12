@@ -224,6 +224,7 @@ impl Symbol for Token {
                         name.clone()
                     }
                     AstKind::Var(ref name) => name.clone(),
+                    AstKind::Lambda { .. } => String::from("<lambda>"),
                     _ => unreachable!(),
                 };
 

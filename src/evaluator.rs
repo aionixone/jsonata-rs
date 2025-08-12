@@ -571,6 +571,23 @@ impl<'a> Evaluator<'a> {
                     let rhs = self.evaluate(rhs_ast, input, frame)?;
 
                     if !rhs.is_function() {
+                        // JSONata allows regex on RHS of ~> as a predicate test against LHS
+                        if let Value::Regex(ref regex_literal) = rhs {
+                            let hay = if lhs.is_string() {
+                                lhs.as_str().into_owned()
+                            } else if lhs.is_undefined() {
+                                String::new()
+                            } else {
+                                fn_string(
+                                    self.fn_context("string", node.char_index, input, frame),
+                                    &[lhs],
+                                )?
+                                .as_str()
+                                .into_owned()
+                            };
+                            let is_match = regex_literal.get_regex().find_iter(&hay).next().is_some();
+                            return Ok(Value::bool(is_match));
+                        }
                         return Err(Error::T2006RightSideNotFunction(rhs_ast.char_index));
                     }
 

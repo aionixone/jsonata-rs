@@ -13,13 +13,14 @@ pub fn format_custom_date(date: &DateTime<FixedOffset>, picture: &str) -> Result
     while i < chars.len() {
         let ch = chars[i];
 
-        if ch == '[' && i + 1 < chars.len() && chars[i + 1] == '[' {
+        // Only treat [[ and ]] as escaped literal brackets when NOT inside a pattern
+        if !inside_brackets && ch == '[' && i + 1 < chars.len() && chars[i + 1] == '[' {
             formatted_string.push('[');
             i += 2; // Skip both [[
             continue;
         }
 
-        if ch == ']' && i + 1 < chars.len() && chars[i + 1] == ']' {
+        if !inside_brackets && ch == ']' && i + 1 < chars.len() && chars[i + 1] == ']' {
             formatted_string.push(']');
             i += 2; // Skip both ]]
             continue;

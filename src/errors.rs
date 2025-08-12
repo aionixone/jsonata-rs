@@ -51,6 +51,9 @@ pub enum Error {
     D3138Error(String),
     D3139Error(String),
     D3140MalformedUrl(String),
+    D3120SyntaxErrorInEval(String),
+    D3121DynamicErrorInEval(String),
+    D3130FormattingOrParsingIntegerUnsupported(String),
     D3133PictureStringNameModifierError(String),
     D3134TooManyTzDigits(String),
     D3135PictureStringNoClosingBracketError(String),
@@ -61,6 +64,7 @@ pub enum Error {
     T1003NonStringKey(usize, String),
     T1005InvokedNonFunctionSuggest(usize, String),
     T1006InvokedNonFunction(usize),
+    T1010MatcherInvalid(String),
     T2001LeftSideNotNumber(usize, String),
     T2002RightSideNotNumber(usize, String),
     T2003LeftSideNotInteger(usize),
@@ -146,6 +150,9 @@ impl Error {
             Error::D3138Error(..) => "D3138",
             Error::D3139Error(..) => "D3139",
             Error::D3140MalformedUrl(..) => "D3140",
+            Error::D3120SyntaxErrorInEval(..) => "D3120",
+            Error::D3121DynamicErrorInEval(..) => "D3121",
+            Error::D3130FormattingOrParsingIntegerUnsupported(..) => "D3130",
 
             // Type errors
             Error::T0410ArgumentNotValid(..) => "T0410",
@@ -153,6 +160,7 @@ impl Error {
             Error::T1003NonStringKey(..) => "T1003",
             Error::T1005InvokedNonFunctionSuggest(..) => "T1005",
             Error::T1006InvokedNonFunction(..) => "T1006",
+            Error::T1010MatcherInvalid(..) => "T1010",
             Error::T2001LeftSideNotNumber(..) => "T2001",
             Error::T2002RightSideNotNumber(..) => "T2002",
             Error::T2003LeftSideNotInteger(..) => "T2003",
@@ -275,6 +283,12 @@ impl fmt::Display for Error {
                 write!(f, "{}: The $single() function expected exactly 1 matching result.  Instead it matched 0.", m),
             D3140MalformedUrl(ref fn_name) =>
                 write!(f, "Malformed URL passed to ${}()", fn_name),
+            D3120SyntaxErrorInEval(ref v) =>
+                write!(f, "Syntax error in expression passed to function eval: {}", v),
+            D3121DynamicErrorInEval(ref v) =>
+                write!(f, "Dynamic error evaluating the expression passed to function eval: {}", v),
+            D3130FormattingOrParsingIntegerUnsupported(ref v) =>
+                write!(f, "Formatting or parsing an integer as a sequence starting with {} is not supported by this implementation", v),
             // Type errors
             T0410ArgumentNotValid(ref p, ref i, ref t) =>
                 write!(f, "{}: Argument {} of function {} does not match function signature", p, i, t),
@@ -286,6 +300,8 @@ impl fmt::Display for Error {
                 write!(f, "{}: Attempted to invoke a non-function. Did you mean ${}?", p, t),
             T1006InvokedNonFunction(ref p) =>
                 write!(f, "{}: Attempted to invoke a non-function", p),
+            T1010MatcherInvalid(ref t) =>
+                write!(f, "The matcher function argument passed to function {} does not return the correct object structure", t),
             T2001LeftSideNotNumber(ref p, ref o) =>
                 write!( f, "{}: The left side of the `{}` operator must evaluate to a number", p, o),
             T2002RightSideNotNumber(ref p, ref o) =>
