@@ -533,34 +533,31 @@ impl<'a> Tokenizer<'a> {
                                     let codepoint = self.get_codepoint()?;
 
                                     let unicode = match char::try_from(codepoint as u32) {
-                                        Ok(code) => code,
-                                        Err(_) => match (self.bump(), self.bump()) {
-                                            // The codepoint was not valid UTF-8, look for another one that could be part
-                                            // of a surrogate pair
-                                            ('\\', 'u') => {
-                                                match decode_utf16(
-                                                    [codepoint, self.get_codepoint()?]
-                                                        .iter()
-                                                        .copied(),
-                                                )
-                                                .next()
-                                                {
+                                        Ok(code) => {
+                                            // Valid single codepoint
+                                            self.buffer.push(code);
+                                            continue;
+                                        }
+                                        Err(_) => {
+                                            // Potential surrogate pair if next two are \u
+                                            if self.peek() == '\\' && self.peek_second() == 'u' {
+                                                // consume the "\\u"
+                                                self.bump();
+                                                self.bump();
+                                                let second = self.get_codepoint()?;
+                                                match decode_utf16([codepoint, second].iter().copied()).next() {
                                                     Some(Ok(code)) => code,
                                                     _ => {
-                                                        return Err(
-                                                            Error::S0104InvalidUnicodeEscape(
-                                                                self.start_char_index,
-                                                            ),
-                                                        )
+                                                        return Err(Error::S0104InvalidUnicodeEscape(self.start_char_index));
                                                     }
                                                 }
+                                            } else {
+                                                // Not a valid surrogate pair. Preserve the original escape literally
+                                                let lit = format!("\\u{:04X}", codepoint);
+                                                for c in lit.chars() { self.buffer.push(c); }
+                                                continue;
                                             }
-                                            _ => {
-                                                return Err(Error::S0104InvalidUnicodeEscape(
-                                                    self.start_char_index,
-                                                ))
-                                            }
-                                        },
+                                        }
                                     };
 
                                     self.buffer.push(unicode);

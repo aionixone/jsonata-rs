@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::collections::HashSet;
 
 fn main() {
     println!("cargo:rerun-if-changed=tests/testsuite/**/*.json");
@@ -18,8 +19,34 @@ fn main() {
         r
     };
 
+    // Optional: Enable specific groups under `skip/` by setting CSV env `JSONATA_ENABLE_GROUPS`.
+    // Examples:
+    //   JSONATA_ENABLE_GROUPS=function-typeOf,function-average
+    //   JSONATA_ENABLE_GROUPS=all
+    let enabled_groups_env = env::var("JSONATA_ENABLE_GROUPS").unwrap_or_default();
+    let enable_all = enabled_groups_env.trim().eq_ignore_ascii_case("all");
+    let enabled_groups: HashSet<String> = enabled_groups_env
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     for resource in resources {
-        if resource.contains("/skip/") {
+        let is_skip = resource.contains("/skip/");
+        let should_ignore = if is_skip {
+            if enable_all {
+                false
+            } else if enabled_groups.is_empty() {
+                true
+            } else {
+                let group = extract_group_from_skip_path(&resource);
+                !enabled_groups.contains(&group)
+            }
+        } else {
+            false
+        };
+
+        if should_ignore {
             writeln!(
                 file,
                 r#"
@@ -76,4 +103,25 @@ fn sanitize_filename(filename: &str) -> String {
     }
 
     sanitized
+}
+
+/// Extract the logical group name from a `.../skip/...` resource path.
+///
+/// Patterns handled:
+/// - tests/testsuite/skip/<group>/caseXXX.json -> group = segment after `skip`
+/// - tests/customsuite/<group>/skip/caseXXX.json -> group = segment before `skip`
+fn extract_group_from_skip_path(resource: &str) -> String {
+    let parts: Vec<&str> = resource.split('/').collect();
+    if let Some((idx, _)) = parts.iter().enumerate().find(|(_, s)| **s == "skip") {
+        // testsuite style: skip/<group>/...
+        if idx + 2 < parts.len() {
+            return parts[idx + 1].to_string();
+        }
+        // customsuite style: .../<group>/skip/<file>
+        if idx >= 1 {
+            return parts[idx - 1].to_string();
+        }
+    }
+    // Fallback: whole path as group, unlikely but safe
+    resource.to_string()
 }

@@ -147,6 +147,10 @@ impl<'a> JsonAta<'a> {
         bind_native!("lowercase", 1, fn_lowercase);
         bind_native!("map", 2, fn_map);
         bind_native!("match", 2, fn_match);
+        bind_native!("encodeUrl", 1, fn_encode_url);
+        bind_native!("encodeUrlComponent", 1, fn_encode_url_component);
+        bind_native!("decodeUrl", 1, fn_decode_url);
+        bind_native!("decodeUrlComponent", 1, fn_decode_url_component);
         bind_native!("max", 1, fn_max);
         bind_native!("merge", 1, fn_merge);
         bind_native!("min", 1, fn_min);
@@ -156,6 +160,8 @@ impl<'a> JsonAta<'a> {
         bind_native!("pad", 2, fn_pad);
         bind_native!("power", 2, fn_power);
         bind_native!("random", 0, fn_random);
+        bind_native!("type", 1, fn_type_of);
+        bind_native!("average", 1, fn_average);
         bind_native!("reduce", 3, fn_reduce);
         bind_native!("replace", 4, fn_replace);
         bind_native!("reverse", 1, fn_reverse);
