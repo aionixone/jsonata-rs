@@ -154,6 +154,8 @@ impl<'a> JsonAta<'a> {
         bind_native!("decodeUrl", 1, fn_decode_url);
         bind_native!("decodeUrlComponent", 1, fn_decode_url_component);
         bind_native!("parseInteger", 2, fn_parse_integer);
+        bind_native!("formatInteger", 2, fn_format_integer);
+        bind_native!("formatNumber", 3, fn_format_number);
         bind_native!("eval", 2, fn_eval);
         bind_native!("max", 1, fn_max);
         bind_native!("merge", 1, fn_merge);

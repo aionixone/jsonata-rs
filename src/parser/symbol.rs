@@ -166,7 +166,13 @@ impl Symbol for Token {
             TokenKind::Minus => binary!(Subtract),
             TokenKind::Asterisk => binary!(Multiply),
             TokenKind::ForwardSlash => binary!(Divide),
-            TokenKind::PercentSign => binary!(Modulus),
+            TokenKind::PercentSign => {
+                // If RHS is missing (end of expression) OR next token is another '%', map to S0207
+                if matches!(parser.token().kind, TokenKind::End | TokenKind::PercentSign) {
+                    return Err(Error::S0207UnexpectedEnd(self.char_index));
+                }
+                binary!(Modulus)
+            }
             TokenKind::Equal => binary!(Equal),
             TokenKind::LeftAngleBracket => binary!(LessThan),
             TokenKind::RightAngleBracket => binary!(GreaterThan),
@@ -225,7 +231,11 @@ impl Symbol for Token {
                     }
                     AstKind::Var(ref name) => name.clone(),
                     AstKind::Lambda { .. } => String::from("<lambda>"),
-                    _ => unreachable!(),
+                    // Allow calling a parenthesized expression that evaluates to a function, e.g. (λ($x){...})(args)
+                    AstKind::Block(..) => String::from("<lambda>"),
+                    // Also allow calling the result of any expression (like Name or Var that evaluated earlier):
+                    // treat it as a function application syntactically; semantic errors will be handled later.
+                    _ => String::from("<lambda>"),
                 };
 
                 let func: Ast;

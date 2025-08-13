@@ -25,6 +25,8 @@ pub enum Error {
     S0214ExpectedVarRight(usize, String),
     S0215BindingAfterPredicates(usize),
     S0216BindingAfterSort(usize),
+    S0217ParentNotDerived(usize),
+    S0207UnexpectedEnd(usize),
     S0301EmptyRegex(usize),
     S0302UnterminatedRegex(usize),
     // This variant is not present in the JS implementation
@@ -60,10 +62,13 @@ pub enum Error {
 
     // Type errors
     T0410ArgumentNotValid(usize, usize, String),
+    T0411ContextValueNotCompatible(usize, usize, String),
     T0412ArgumentMustBeArrayOfType(usize, usize, String, String),
     T1003NonStringKey(usize, String),
     T1005InvokedNonFunctionSuggest(usize, String),
     T1006InvokedNonFunction(usize),
+    T1007AttemptedPartialNonFunctionSuggest(usize, String),
+    T1008AttemptedPartialNonFunction(usize),
     T1010MatcherInvalid(String),
     T2001LeftSideNotNumber(usize, String),
     T2002RightSideNotNumber(usize, String),
@@ -122,6 +127,8 @@ impl Error {
             Error::S0214ExpectedVarRight(..) => "S0214",
             Error::S0215BindingAfterPredicates(..) => "S0215",
             Error::S0216BindingAfterSort(..) => "S0216",
+            Error::S0217ParentNotDerived(..) => "S0217",
+            Error::S0207UnexpectedEnd(..) => "S0207",
             Error::S0301EmptyRegex(..) => "S0301",
             Error::S0302UnterminatedRegex(..) => "S0302",
             Error::S0303InvalidRegex(..) => "S0303",
@@ -156,10 +163,13 @@ impl Error {
 
             // Type errors
             Error::T0410ArgumentNotValid(..) => "T0410",
+            Error::T0411ContextValueNotCompatible(..) => "T0411",
             Error::T0412ArgumentMustBeArrayOfType(..) => "T0412",
             Error::T1003NonStringKey(..) => "T1003",
             Error::T1005InvokedNonFunctionSuggest(..) => "T1005",
             Error::T1006InvokedNonFunction(..) => "T1006",
+            Error::T1007AttemptedPartialNonFunctionSuggest(..) => "T1007",
+            Error::T1008AttemptedPartialNonFunction(..) => "T1008",
             Error::T1010MatcherInvalid(..) => "T1010",
             Error::T2001LeftSideNotNumber(..) => "T2001",
             Error::T2002RightSideNotNumber(..) => "T2002",
@@ -212,6 +222,10 @@ impl fmt::Display for Error {
                 write!(f, "{}: Expected `{}` before end of expression", p, t),
             S0204UnknownOperator(ref p, ref t) =>
                 write!(f, "{}: Unknown operator: `{}`", p, t),
+            S0217ParentNotDerived(ref p) =>
+                write!(f, "{}: The object representing the 'parent' cannot be derived from this expression", p),
+            S0207UnexpectedEnd(ref p) =>
+                write!(f, "{}: Unexpected end of expression", p),
             S0208InvalidFunctionParam(ref p, ref k) =>
                 write!(f, "{}: Parameter `{}` of function definition must be a variable name (start with $)", p, k),
             S0209InvalidPredicate(ref p) =>
@@ -292,6 +306,8 @@ impl fmt::Display for Error {
             // Type errors
             T0410ArgumentNotValid(ref p, ref i, ref t) =>
                 write!(f, "{}: Argument {} of function {} does not match function signature", p, i, t),
+            T0411ContextValueNotCompatible(ref p, ref i, ref t) =>
+                write!(f, "{}: Context value is not a compatible type with argument {} of function {}", p, i, t),
             T0412ArgumentMustBeArrayOfType(ref p, ref i, ref t, ref ty) =>
                 write!(f, "{}: Argument {} of function {} must be an array of {}", p, i, t, ty),
             T1003NonStringKey(ref p, ref v) =>
@@ -300,6 +316,10 @@ impl fmt::Display for Error {
                 write!(f, "{}: Attempted to invoke a non-function. Did you mean ${}?", p, t),
             T1006InvokedNonFunction(ref p) =>
                 write!(f, "{}: Attempted to invoke a non-function", p),
+            T1007AttemptedPartialNonFunctionSuggest(ref p, ref t) =>
+                write!(f, "{}: Attempted to partially apply a non-function. Did you mean ${}?", p, t),
+            T1008AttemptedPartialNonFunction(ref p) =>
+                write!(f, "{}: Attempted to partially apply a non-function", p),
             T1010MatcherInvalid(ref t) =>
                 write!(f, "The matcher function argument passed to function {} does not return the correct object structure", t),
             T2001LeftSideNotNumber(ref p, ref o) =>

@@ -118,6 +118,7 @@ impl<'a> Evaluator<'a> {
                 input,
                 name,
             ),
+            AstKind::PartialArg => input,
             AstKind::Lambda { .. } => Value::lambda(self.arena, node, input, frame.clone()),
             AstKind::Function {
                 ref proc,
@@ -136,6 +137,16 @@ impl<'a> Evaluator<'a> {
                 // Wrap the regex literal in a `Value::Regex` and return it
                 self.arena.alloc(Value::Regex(regex_literal.clone()))
             }
+            AstKind::Parent => {
+                if let Some(parent) = frame.lookup("%") {
+                    if parent.is_undefined() {
+                        return Err(Error::S0217ParentNotDerived(node.char_index));
+                    }
+                    parent
+                } else {
+                    return Err(Error::S0217ParentNotDerived(node.char_index));
+                }
+            },
             _ => unimplemented!("TODO: node kind not yet supported: {:#?}", node.kind),
         };
 
@@ -144,6 +155,14 @@ impl<'a> Evaluator<'a> {
                 if let AstKind::Filter(ref expr) = filter.kind {
                     result = self.evaluate_filter(expr, result, frame)?
                 }
+            }
+        }
+
+        // Apply object-constructor grouping on the result if present,
+        // but skip here for Path nodes since evaluate_path already handles it
+        if !matches!(node.kind, AstKind::Path(_)) {
+            if let Some((char_index, ref object)) = node.group_by {
+                result = self.evaluate_group_expression(char_index, object, result, frame)?;
             }
         }
 
@@ -558,6 +577,32 @@ impl<'a> Evaluator<'a> {
             )),
 
             BinaryOp::Apply => {
+                // Function-to-function: compose
+                if lhs.is_function() {
+                    // Evaluate RHS to a function value
+                    let rhs_val = match rhs_ast.kind {
+                        AstKind::Function { .. } => self.evaluate(rhs_ast, input, frame)?,
+                        _ => self.evaluate(rhs_ast, input, frame)?,
+                    };
+                    if !rhs_val.is_function() {
+                        return Err(Error::T2006RightSideNotFunction(rhs_ast.char_index));
+                    }
+
+                    let chain = self.evaluate(
+                        self.chain_ast.as_ref().unwrap(),
+                        Value::undefined(),
+                        frame,
+                    )?;
+                    return Ok(self.apply_function(
+                        lhs_ast.char_index,
+                        Value::undefined(),
+                        chain,
+                        &[lhs, rhs_val],
+                        frame,
+                    )?);
+                }
+
+                // Value-to-function: apply
                 if let AstKind::Function {
                     ref proc,
                     ref args,
@@ -565,57 +610,36 @@ impl<'a> Evaluator<'a> {
                     ..
                 } = rhs_ast.kind
                 {
-                    // Function invocation with lhs as the first argument
-                    Ok(self.evaluate_function(input, proc, args, is_partial, frame, Some(lhs))?)
-                } else {
-                    let rhs = self.evaluate(rhs_ast, input, frame)?;
-
-                    if !rhs.is_function() {
-                        // JSONata allows regex on RHS of ~> as a predicate test against LHS
-                        if let Value::Regex(ref regex_literal) = rhs {
-                            let hay = if lhs.is_string() {
-                                lhs.as_str().into_owned()
-                            } else if lhs.is_undefined() {
-                                String::new()
-                            } else {
-                                fn_string(
-                                    self.fn_context("string", node.char_index, input, frame),
-                                    &[lhs],
-                                )?
-                                .as_str()
-                                .into_owned()
-                            };
-                            let is_match = regex_literal.get_regex().find_iter(&hay).next().is_some();
-                            return Ok(Value::bool(is_match));
-                        }
-                        return Err(Error::T2006RightSideNotFunction(rhs_ast.char_index));
-                    }
-
-                    if lhs.is_function() {
-                        // Apply function chaining
-                        let chain = self.evaluate(
-                            self.chain_ast.as_ref().unwrap(),
-                            Value::undefined(),
-                            frame,
-                        )?;
-
-                        Ok(self.apply_function(
-                            lhs_ast.char_index,
-                            Value::undefined(),
-                            chain,
-                            &[lhs, rhs],
-                            frame,
-                        )?)
-                    } else {
-                        Ok(self.apply_function(
-                            rhs_ast.char_index,
-                            Value::undefined(),
-                            rhs,
-                            &[lhs],
-                            frame,
-                        )?)
-                    }
+                    return Ok(self.evaluate_function(input, proc, args, is_partial, frame, Some(lhs))?);
                 }
+
+                let rhs = self.evaluate(rhs_ast, input, frame)?;
+                if !rhs.is_function() {
+                    if let Value::Regex(ref regex_literal) = rhs {
+                        let hay = if lhs.is_string() {
+                            lhs.as_str().into_owned()
+                        } else if lhs.is_undefined() {
+                            String::new()
+                        } else {
+                            fn_string(
+                                self.fn_context("string", node.char_index, input, frame),
+                                &[lhs],
+                            )?
+                            .as_str()
+                            .into_owned()
+                        };
+                        let is_match = regex_literal.get_regex().find_iter(&hay).next().is_some();
+                        return Ok(Value::bool(is_match));
+                    }
+                    return Err(Error::T2006RightSideNotFunction(rhs_ast.char_index));
+                }
+                Ok(self.apply_function(
+                    rhs_ast.char_index,
+                    Value::undefined(),
+                    rhs,
+                    &[lhs],
+                    frame,
+                )?)
             }
 
             BinaryOp::In => {
@@ -679,7 +703,9 @@ impl<'a> Evaluator<'a> {
         let mut is_tuple_stream = false;
         let mut tuple_bindings = Value::undefined();
 
-        for (step_index, step) in steps.iter().enumerate() {
+        let mut step_index = 0;
+        while step_index < steps.len() {
+            let step = &steps[step_index];
             // If any step is marked as a tuple, then we have to deal with a tuple stream
             if step.tuple {
                 is_tuple_stream = true;
@@ -692,7 +718,30 @@ impl<'a> Evaluator<'a> {
             } else if is_tuple_stream {
                 tuple_bindings = self.evaluate_tuple_step(step, input, tuple_bindings, frame)?;
             } else {
-                result = self.evaluate_step(step, input, frame, step_index == steps.len() - 1)?;
+                // Handle parent operator in path context
+                if let AstKind::Parent = step.kind {
+                    // Get parent context from frame
+                    if let Some(parent) = frame.lookup("%") {
+                        result = parent;
+                        // If there are more steps after the parent operator, 
+                        // we need to continue evaluating them on the parent context
+                        if step_index + 1 < steps.len() {
+                            let remaining_steps = &steps[step_index + 1..];
+                            // Create a new path with remaining steps and evaluate on parent
+                            let mut remaining_path = Ast::new(AstKind::Path(remaining_steps.to_vec()), step.char_index);
+                            remaining_path.keep_array = node.keep_array;
+                            remaining_path.keep_singleton_array = node.keep_singleton_array;
+                            remaining_path.group_by = node.group_by.clone();
+                            result = self.evaluate(&remaining_path, result, frame)?;
+                            // Skip the remaining steps since we've processed them
+                            step_index = steps.len() - 1;
+                        }
+                    } else {
+                        result = Value::undefined();
+                    }
+                } else {
+                    result = self.evaluate_step(step, input, frame, step_index == steps.len() - 1)?;
+                }
             }
 
             // If any step results in undefined or an empty array, we can break out as
@@ -703,7 +752,8 @@ impl<'a> Evaluator<'a> {
                 break;
             }
 
-            input = result
+            input = result;
+            step_index += 1;
         }
 
         if is_tuple_stream {
@@ -767,6 +817,16 @@ impl<'a> Evaluator<'a> {
 
         let mut result: Vec<&'a Value<'a>> = Vec::new();
 
+        // Check if this step is a parent operator
+        if let AstKind::Parent = step.kind {
+            // For parent operator in path, we need to get the parent context from the frame
+            if let Some(parent) = frame.lookup("%") {
+                return Ok(parent);
+            } else {
+                return Ok(Value::undefined());
+            }
+        }
+
         // Evaluate the step on each member of the input
         for (item_index, item) in input.members().enumerate() {
             if let Some(ref index_var) = step.index {
@@ -821,6 +881,37 @@ impl<'a> Evaluator<'a> {
         tuple_bindings: &'a Value<'a>,
         frame: &Frame<'a>,
     ) -> Result<&'a Value<'a>> {
+        fn is_navigational_step(step: &Ast) -> bool {
+            match &step.kind {
+                AstKind::Name(..) | AstKind::Wildcard | AstKind::Descendent => true,
+                AstKind::Path(steps) => {
+                    if let Some(last) = steps.last() {
+                        is_navigational_step(last)
+                    } else {
+                        false
+                    }
+                }
+                AstKind::Block(exprs) => {
+                    if exprs.len() == 1 {
+                        is_navigational_step(&exprs[0])
+                    } else {
+                        false
+                    }
+                }
+                _ => false
+            }
+        }
+        if std::env::var("JSONATA_DEBUG_PARENT").ok().as_deref() == Some("1") {
+            let input_len_dbg = if input.is_array() { input.len() } else { 1 };
+            eprintln!(
+                "[tuple_step] char={} kind={:?} tuple_in={} input_len={} frame_has_%={}",
+                step.char_index,
+                step.kind,
+                !tuple_bindings.is_undefined(),
+                input_len_dbg,
+                frame.lookup("%").is_some()
+            );
+        }
         if let AstKind::Sort(ref sort_terms) = step.kind {
             let mut result = if tuple_bindings.is_undefined() {
                 let sorted = self.evaluate_sort(step.char_index, sort_terms, input, frame)?;
@@ -852,6 +943,12 @@ impl<'a> Evaluator<'a> {
             for member in input.members() {
                 let tuple = Value::object(self.arena);
                 tuple.insert("@", member);
+                // Seed parent reference from current frame if available; otherwise undefined
+                if let Some(parent) = frame.lookup("%") {
+                    tuple.insert("%", parent);
+                } else {
+                    tuple.insert("%", Value::undefined());
+                }
                 tuple_bindings.push(tuple);
             }
             tuple_bindings
@@ -891,6 +988,22 @@ impl<'a> Evaluator<'a> {
                                 .insert(index_var, Value::number(self.arena, binding_index as f64));
                         }
                     }
+                    // Update parent reference only for navigational steps (e.g., Name, Wildcard, Descendent)
+                    // For computed steps (e.g., object constructors, functions), the result does not
+                    // derive from the current context as a child, so parent is not updated.
+                    if is_navigational_step(step) {
+                        output_tuple.insert("%", &tuple["@"]);
+                    } else if matches!(step.kind, AstKind::Parent) {
+                        // Move up: new parent is previous grandparent
+                        output_tuple.insert("%", &tuple["%"]);
+                    } // else: keep existing % copied from tuple
+                    if std::env::var("JSONATA_DEBUG_PARENT").ok().as_deref() == Some("1") {
+                        eprintln!(
+                            "[tuple_emit] @={:?} %={:?}",
+                            output_tuple.get_entry("@"),
+                            output_tuple.get_entry("%")
+                        );
+                    }
                     result.push(output_tuple);
                 }
             }
@@ -927,8 +1040,7 @@ impl<'a> Evaluator<'a> {
         let is_tuple_sort = input.has_flags(ArrayFlags::TUPLE_STREAM);
 
         let comp = |a: &'a Value<'a>, b: &'a Value<'a>| {
-            let mut result = 0;
-
+            // Compare across sort terms; return as soon as one term orders the pair
             for (sort_term, descending) in sort_terms {
                 let aa = if is_tuple_sort {
                     let tuple_frame = Frame::from_tuple(frame, a);
@@ -944,38 +1056,37 @@ impl<'a> Evaluator<'a> {
                     self.evaluate(sort_term, b, frame)?
                 };
 
-                if aa.is_undefined() {
-                    result = if bb.is_undefined() { 0 } else { 1 };
+                // Undefineds sort last
+                if aa.is_undefined() && bb.is_undefined() {
                     continue;
-                }
-
-                if bb.is_undefined() {
-                    result = -1;
-                    continue;
+                } else if aa.is_undefined() {
+                    // aa > bb so that undefined comes after defined
+                    let ordered = true;
+                    return Ok(if *descending { !ordered } else { ordered });
+                } else if bb.is_undefined() {
+                    let ordered = false; // aa < bb
+                    return Ok(if *descending { !ordered } else { ordered });
                 }
 
                 if !(aa.is_string() || aa.is_number()) || !(bb.is_string() || bb.is_number()) {
                     return Err(Error::T2008InvalidOrderBy(char_index));
                 }
 
+                let mut cmp_result = 0; // -1 if aa < bb, 1 if aa > bb, 0 if equal
                 match (aa, bb) {
-                    (Value::String(a), Value::String(b)) if *a == *b => {
-                        continue;
+                    (Value::String(a), Value::String(b)) => {
+                        if *a < *b {
+                            cmp_result = -1;
+                        } else if *a > *b {
+                            cmp_result = 1;
+                        }
                     }
-                    (Value::String(a), Value::String(b)) if *a < *b => {
-                        result = -1;
-                    }
-                    (Value::String(..), Value::String(..)) => {
-                        result = 1;
-                    }
-                    (Value::Number(a), Value::Number(b)) if *a == *b => {
-                        continue;
-                    }
-                    (Value::Number(a), Value::Number(b)) if *a < *b => {
-                        result = -1;
-                    }
-                    (Value::Number(..), Value::Number(..)) => {
-                        result = 1;
+                    (Value::Number(a), Value::Number(b)) => {
+                        if *a < *b {
+                            cmp_result = -1;
+                        } else if *a > *b {
+                            cmp_result = 1;
+                        }
                     }
                     _ => {
                         return Err(Error::T2007CompareTypeMismatch(
@@ -984,14 +1095,19 @@ impl<'a> Evaluator<'a> {
                             b.to_string(),
                         ));
                     }
-                };
-
-                if *descending {
-                    result = -result;
                 }
-            }
 
-            Ok(result == 1)
+                if cmp_result != 0 {
+                    if *descending {
+                        cmp_result = -cmp_result;
+                    }
+                    // Return true if left should come after right
+                    return Ok(cmp_result == 1);
+                }
+                // else: equal on this term, continue to next term
+            }
+            // All terms equal: keep original order (stable)
+            Ok(false)
         };
 
         let sorted = merge_sort(unsorted, &comp)?;
@@ -1178,11 +1294,69 @@ impl<'a> Evaluator<'a> {
         input: &'a Value<'a>,
         proc: &Ast,
         args: &[Ast],
-        _is_partial: bool,
+        is_partial: bool,
         frame: &Frame<'a>,
         context: Option<&'a Value<'a>>,
     ) -> Result<&'a Value<'a>> {
-        let evaluated_proc = self.evaluate(proc, input, frame)?;
+        // If this is a partial application with no pipeline/context value, return a lambda
+        // that accepts a single argument and substitutes it into the placeholder positions.
+        if is_partial && context.is_none() {
+            // If the proc resolves to undefined (unknown function name), error T1008
+            if let AstKind::Path(ref steps) = proc.kind {
+                if let AstKind::Name(ref name) = steps[0].kind {
+                    if frame.lookup(name).is_none() {
+                        return Err(Error::T1008AttemptedPartialNonFunction(proc.char_index));
+                    } else {
+                        // Disallow partial application using bare function names; require $-prefixed variables
+                        return Err(Error::T1007AttemptedPartialNonFunctionSuggest(proc.char_index, name.clone()));
+                    }
+                }
+            }
+            // Build parameter vars, one per placeholder in left-to-right order
+            let mut param_names: Vec<String> = Vec::new();
+            let mut replaced_args: Vec<Ast> = Vec::with_capacity(args.len());
+            for a in args.iter() {
+                if matches!(a.kind, AstKind::PartialArg) {
+                    let idx = param_names.len();
+                    let pname = format!("$x{}", idx + 1);
+                    param_names.push(pname.clone());
+                    replaced_args.push(Ast::new(AstKind::Var(pname), a.char_index));
+                } else {
+                    replaced_args.push(a.clone());
+                }
+            }
+            // Build inner function AST with placeholders removed
+            let inner_func = Ast::new(
+                AstKind::Function {
+                    name: String::from("<partial>"),
+                    proc: Box::new(proc.clone()),
+                    args: replaced_args,
+                    is_partial: false,
+                },
+                proc.char_index,
+            );
+            // Build lambda AST that takes one argument and evaluates inner function
+            let lambda_ast = Ast::new(
+                AstKind::Lambda {
+                    name: String::from("<partial>"),
+                    args: param_names
+                        .iter()
+                        .map(|n| Ast::new(AstKind::Var(n.clone()), proc.char_index))
+                        .collect(),
+                    body: Box::new(inner_func),
+                    thunk: false,
+                },
+                proc.char_index,
+            );
+            return Ok(Value::lambda(self.arena, &lambda_ast, input, frame.clone()));
+        }
+
+        let evaluated_proc = if matches!(proc.kind, AstKind::Parent) {
+            // Calling `%()` should be treated as invoking a non-function
+            Value::undefined()
+        } else {
+            self.evaluate(proc, input, frame)?
+        };
 
         // Help the user out if they forgot a '$'
         if evaluated_proc.is_undefined() {
@@ -1193,6 +1367,9 @@ impl<'a> Evaluator<'a> {
                             proc.char_index,
                             name.clone(),
                         ));
+                    } else if is_partial {
+                        // Unknown function in partial application: T1007
+                        return Err(Error::T1007AttemptedPartialNonFunctionSuggest(proc.char_index, name.clone()));
                     }
                 }
             }
@@ -1204,9 +1381,19 @@ impl<'a> Evaluator<'a> {
             evaluated_args.push(context);
         }
 
-        for arg in args {
-            let arg = self.evaluate(arg, input, frame)?;
-            evaluated_args.push(arg);
+        if is_partial {
+            // In partials, replace any PartialArg with current input value
+            for arg in args {
+                match arg.kind {
+                    AstKind::PartialArg => evaluated_args.push(input),
+                    _ => evaluated_args.push(self.evaluate(arg, input, frame)?),
+                }
+            }
+        } else {
+            for arg in args {
+                let arg = self.evaluate(arg, input, frame)?;
+                evaluated_args.push(arg);
+            }
         }
 
         let result = self.apply_function(

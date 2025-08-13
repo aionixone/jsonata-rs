@@ -34,7 +34,7 @@ pub fn process_ast(node: Ast) -> Result<Ast> {
         }
         AstKind::Ternary { .. } => process_ternary(node)?,
         AstKind::Transform { .. } => process_transform(node)?,
-        AstKind::Parent => unimplemented!("Parent not yet implemented"),
+        AstKind::Parent => node,
         _ => node,
     };
 
@@ -223,9 +223,77 @@ fn process_path(char_index: usize, lhs: &mut Box<Ast>, rhs: &mut Box<Ast>) -> Re
         }
 
         result.keep_singleton_array = keep_singleton_array;
+
+        // seekingParent: if any step (or its stages) contains a Parent operator,
+        // mark the first step as tuple to ensure tuple stream is used for the whole path
+        if steps.iter().any(|s| ast_contains_parent(s)) {
+            if let Some(first) = steps.first_mut() {
+                first.tuple = true;
+            }
+        }
     }
 
     Ok(result)
+}
+
+// Recursively check whether an AST node contains a Parent operator anywhere
+fn ast_contains_parent(node: &Ast) -> bool {
+    match node.kind {
+        AstKind::Parent => true,
+        AstKind::Unary(ref op) => match op {
+            UnaryOp::Minus(ref a) => ast_contains_parent(a),
+            UnaryOp::ArrayConstructor(ref items) => items.iter().any(ast_contains_parent),
+            UnaryOp::ObjectConstructor(ref pairs) => pairs
+                .iter()
+                .any(|(k, v)| ast_contains_parent(k) || ast_contains_parent(v)),
+        },
+        AstKind::Binary(_, ref lhs, ref rhs) => {
+            ast_contains_parent(lhs) || ast_contains_parent(rhs)
+        }
+        AstKind::GroupBy(ref lhs, ref obj) => {
+            ast_contains_parent(lhs)
+                || obj
+                    .iter()
+                    .any(|(k, v)| ast_contains_parent(k) || ast_contains_parent(v))
+        }
+        AstKind::OrderBy(ref lhs, ref terms) => {
+            ast_contains_parent(lhs)
+                || terms.iter().any(|(t, _)| ast_contains_parent(t))
+        }
+        AstKind::Block(ref exprs) => exprs.iter().any(ast_contains_parent),
+        AstKind::Function { ref proc, ref args, .. } => {
+            ast_contains_parent(proc) || args.iter().any(ast_contains_parent)
+        }
+        AstKind::Lambda { ref body, ref args, .. } => {
+            ast_contains_parent(body) || args.iter().any(ast_contains_parent)
+        }
+        AstKind::Ternary { ref cond, ref truthy, ref falsy } => {
+            ast_contains_parent(cond)
+                || ast_contains_parent(truthy)
+                || falsy.as_ref().map(|f| ast_contains_parent(f)).unwrap_or(false)
+        }
+        AstKind::Transform { ref pattern, ref update, ref delete } => {
+            ast_contains_parent(pattern)
+                || ast_contains_parent(update)
+                || delete.as_ref().map(|d| ast_contains_parent(d)).unwrap_or(false)
+        }
+        AstKind::Path(ref steps) => steps.iter().any(ast_contains_parent),
+        AstKind::Filter(ref e) => ast_contains_parent(e),
+        AstKind::Sort(ref terms) => terms.iter().any(|(t, _)| ast_contains_parent(t)),
+        // Leaves
+        AstKind::Empty
+        | AstKind::Null
+        | AstKind::Bool(..)
+        | AstKind::String(..)
+        | AstKind::Number(..)
+        | AstKind::Regex(..)
+        | AstKind::Name(..)
+        | AstKind::Var(..)
+        | AstKind::PartialArg
+        | AstKind::Index(..)
+        | AstKind::Wildcard
+        | AstKind::Descendent => false,
+    }
 }
 
 fn process_predicate(char_index: usize, lhs: &mut Box<Ast>, rhs: &mut Box<Ast>) -> Result<Ast> {
