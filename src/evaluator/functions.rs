@@ -2020,6 +2020,141 @@ pub fn fn_base64_decode<'a>(
     Ok(Value::string(context.arena, &decoded))
 }
 
+/// Basic $formatNumber implementation for common decimal patterns
+/// Supports placeholders '0', '9', '#' with optional group separators ',' and decimal '.'
+/// - Grouping: standard 3-digit groups when ',' present in integer picture
+/// - Fractional digits: number of placeholders after '.' controls rounding and zero padding
+/// - '0' and '9' are treated as mandatory digits (zero-padded); '#' is optional (no left padding)
+/// Options argument is currently ignored
+pub fn fn_format_number<'a>(
+    context: FunctionContext<'a, '_>,
+    args: &[&'a Value<'a>],
+) -> Result<&'a Value<'a>> {
+    max_args!(context, args, 3);
+    let value = args.first().copied().unwrap_or_else(Value::undefined);
+    if value.is_undefined() {
+        return Ok(Value::undefined());
+    }
+    assert_arg!(value.is_number(), context, 1);
+
+    let picture = args.get(1).copied().unwrap_or_else(Value::undefined);
+    if picture.is_undefined() {
+        // picture required
+        return Err(Error::T0410ArgumentNotValid(context.char_index, 2, context.name.to_string()))
+    }
+    assert_arg!(picture.is_string(), context, 2);
+
+    // Optional options object (currently ignored)
+    if let Some(opts) = args.get(2) { if !opts.is_undefined() { assert_arg!(opts.is_object(), context, 3); } }
+
+    let pic = picture.as_str();
+    // Validate allowed characters (basic subset)
+    if !pic.chars().all(|c| matches!(c, '0'|'9'|'#'|','|'.')) {
+        // Fallback to argument error for unsupported picture features
+        return Err(Error::T0410ArgumentNotValid(context.char_index, 2, context.name.to_string()));
+    }
+
+    // Split picture into integer and fractional parts
+    let mut parts = pic.split('.');
+    let int_pic = parts.next().unwrap_or("");
+    let frac_pic = parts.next();
+    if parts.next().is_some() {
+        // multiple dots not supported
+        return Err(Error::T0410ArgumentNotValid(context.char_index, 2, context.name.to_string()));
+    }
+
+    let is_grouped = int_pic.contains(',');
+    let int_placeholders: String = int_pic.chars().filter(|&c| c != ',').collect();
+    let mandatory_int = int_placeholders.chars().filter(|&c| c=='0' || c=='9').count();
+
+    // Validate grouping: only support standard 3-digit groups (commas every 3 from right)
+    if is_grouped {
+        // collect positions of commas and count of digits after each comma
+        let mut digits_seen_right = 0usize;
+        let mut distances_from_right: Vec<usize> = Vec::new();
+        for ch in int_pic.chars().rev() {
+            if ch == ',' {
+                distances_from_right.push(digits_seen_right);
+            } else {
+                // only placeholders are present (validated above)
+                digits_seen_right += 1;
+            }
+        }
+        // all distances must be non-zero multiples of 3 and strictly increasing
+        let mut last = 0;
+        for d in distances_from_right.iter() {
+            if *d == 0 || *d % 3 != 0 || *d <= last {
+                return Err(Error::T0410ArgumentNotValid(context.char_index, 2, context.name.to_string()));
+            }
+            last = *d;
+        }
+    }
+
+    // ignore commas in fractional pattern
+    let frac_clean = frac_pic.map(|s| s.chars().filter(|&c| c!=',').collect::<String>());
+    let frac_count = frac_clean.as_ref().map(|s| s.chars().count()).unwrap_or(0);
+    let frac_mandatory = frac_clean.as_ref().map(|s| s.chars().filter(|&c| c=='0' || c=='9').count()).unwrap_or(0);
+
+    // Round value to requested fractional digits
+    let mut n = value.as_f64();
+    if frac_count > 0 {
+        n = multiply_by_pow10(n, frac_count as isize)?;
+        n = n.round_ties_even();
+        n = multiply_by_pow10(n, -(frac_count as isize))?;
+    }
+
+    let is_negative = n.is_sign_negative() && n != 0.0;
+    let n_abs = n.abs();
+    // Truncate/floor when no fractional picture to avoid rounding up integer only pictures
+    let int_part_f = if frac_count == 0 { n_abs.floor() } else { n_abs.trunc() };
+    let int_part = int_part_f as i128;
+    let frac_val = n_abs - (int_part as f64);
+
+    // Build integer part string with left padding for mandatory digits
+    let mut int_str = int_part.to_string();
+    if int_str.len() < mandatory_int {
+        let mut pad = String::new();
+        for _ in 0..(mandatory_int - int_str.len()) { pad.push('0'); }
+        int_str = format!("{}{}", pad, int_str);
+    }
+
+    // Grouping by thousands if requested
+    if is_grouped {
+        let bytes = int_str.as_bytes();
+        let mut grouped = String::new();
+        let mut count = 0usize;
+        for (i, &b) in bytes.iter().rev().enumerate() {
+            if i>0 && count==3 { grouped.push(','); count=0; }
+            grouped.push(b as char);
+            count+=1;
+        }
+        int_str = grouped.chars().rev().collect();
+    }
+
+    // Build fractional part
+    let mut frac_str = String::new();
+    if frac_count > 0 {
+        // compute fraction digits
+        let scale = 10f64.powi(frac_count as i32);
+        let mut frac_int = (frac_val * scale).round() as i128;
+        // compensate rounding carry affecting int_part already captured above
+        if frac_int as usize > 10usize.pow(frac_count as u32) - 1 { frac_int = 0; }
+        frac_str = format!("{:0width$}", frac_int, width=frac_mandatory.max(frac_count));
+        // trim optional trailing '#' if any optional placeholders used
+        if frac_mandatory < frac_count {
+            while frac_str.ends_with('0') && frac_str.len() > frac_mandatory { frac_str.pop(); }
+        }
+        if !frac_str.is_empty() { frac_str.insert(0, '.'); }
+    }
+
+    let mut out = String::new();
+    if is_negative { out.push('-'); }
+    out.push_str(&int_str);
+    out.push_str(&frac_str);
+
+    Ok(Value::string(context.arena, &out))
+}
+
 /// Minimal stub for $formatInteger to satisfy undefined-argument behavior.
 /// Full formatting semantics (pictures, ordinals, roman numerals, words, spreadsheet columns)
 /// are not implemented yet.
