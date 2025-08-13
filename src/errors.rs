@@ -25,6 +25,8 @@ pub enum Error {
     S0214ExpectedVarRight(usize, String),
     S0215BindingAfterPredicates(usize),
     S0216BindingAfterSort(usize),
+    S0217ParentNotDerived(usize),
+    S0207UnexpectedEnd(usize),
     S0301EmptyRegex(usize),
     S0302UnterminatedRegex(usize),
     // This variant is not present in the JS implementation
@@ -125,6 +127,8 @@ impl Error {
             Error::S0214ExpectedVarRight(..) => "S0214",
             Error::S0215BindingAfterPredicates(..) => "S0215",
             Error::S0216BindingAfterSort(..) => "S0216",
+            Error::S0217ParentNotDerived(..) => "S0217",
+            Error::S0207UnexpectedEnd(..) => "S0207",
             Error::S0301EmptyRegex(..) => "S0301",
             Error::S0302UnterminatedRegex(..) => "S0302",
             Error::S0303InvalidRegex(..) => "S0303",
@@ -218,6 +222,10 @@ impl fmt::Display for Error {
                 write!(f, "{}: Expected `{}` before end of expression", p, t),
             S0204UnknownOperator(ref p, ref t) =>
                 write!(f, "{}: Unknown operator: `{}`", p, t),
+            S0217ParentNotDerived(ref p) =>
+                write!(f, "{}: The object representing the 'parent' cannot be derived from this expression", p),
+            S0207UnexpectedEnd(ref p) =>
+                write!(f, "{}: Unexpected end of expression", p),
             S0208InvalidFunctionParam(ref p, ref k) =>
                 write!(f, "{}: Parameter `{}` of function definition must be a variable name (start with $)", p, k),
             S0209InvalidPredicate(ref p) =>

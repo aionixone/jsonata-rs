@@ -166,7 +166,13 @@ impl Symbol for Token {
             TokenKind::Minus => binary!(Subtract),
             TokenKind::Asterisk => binary!(Multiply),
             TokenKind::ForwardSlash => binary!(Divide),
-            TokenKind::PercentSign => binary!(Modulus),
+            TokenKind::PercentSign => {
+                // If RHS is missing (end of expression) OR next token is another '%', map to S0207
+                if matches!(parser.token().kind, TokenKind::End | TokenKind::PercentSign) {
+                    return Err(Error::S0207UnexpectedEnd(self.char_index));
+                }
+                binary!(Modulus)
+            }
             TokenKind::Equal => binary!(Equal),
             TokenKind::LeftAngleBracket => binary!(LessThan),
             TokenKind::RightAngleBracket => binary!(GreaterThan),

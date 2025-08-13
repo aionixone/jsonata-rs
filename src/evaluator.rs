@@ -137,6 +137,16 @@ impl<'a> Evaluator<'a> {
                 // Wrap the regex literal in a `Value::Regex` and return it
                 self.arena.alloc(Value::Regex(regex_literal.clone()))
             }
+            AstKind::Parent => {
+                if let Some(parent) = frame.lookup("%") {
+                    if parent.is_undefined() {
+                        return Err(Error::S0217ParentNotDerived(node.char_index));
+                    }
+                    parent
+                } else {
+                    return Err(Error::S0217ParentNotDerived(node.char_index));
+                }
+            },
             _ => unimplemented!("TODO: node kind not yet supported: {:#?}", node.kind),
         };
 
@@ -693,7 +703,9 @@ impl<'a> Evaluator<'a> {
         let mut is_tuple_stream = false;
         let mut tuple_bindings = Value::undefined();
 
-        for (step_index, step) in steps.iter().enumerate() {
+        let mut step_index = 0;
+        while step_index < steps.len() {
+            let step = &steps[step_index];
             // If any step is marked as a tuple, then we have to deal with a tuple stream
             if step.tuple {
                 is_tuple_stream = true;
@@ -706,7 +718,30 @@ impl<'a> Evaluator<'a> {
             } else if is_tuple_stream {
                 tuple_bindings = self.evaluate_tuple_step(step, input, tuple_bindings, frame)?;
             } else {
-                result = self.evaluate_step(step, input, frame, step_index == steps.len() - 1)?;
+                // Handle parent operator in path context
+                if let AstKind::Parent = step.kind {
+                    // Get parent context from frame
+                    if let Some(parent) = frame.lookup("%") {
+                        result = parent;
+                        // If there are more steps after the parent operator, 
+                        // we need to continue evaluating them on the parent context
+                        if step_index + 1 < steps.len() {
+                            let remaining_steps = &steps[step_index + 1..];
+                            // Create a new path with remaining steps and evaluate on parent
+                            let mut remaining_path = Ast::new(AstKind::Path(remaining_steps.to_vec()), step.char_index);
+                            remaining_path.keep_array = node.keep_array;
+                            remaining_path.keep_singleton_array = node.keep_singleton_array;
+                            remaining_path.group_by = node.group_by.clone();
+                            result = self.evaluate(&remaining_path, result, frame)?;
+                            // Skip the remaining steps since we've processed them
+                            step_index = steps.len() - 1;
+                        }
+                    } else {
+                        result = Value::undefined();
+                    }
+                } else {
+                    result = self.evaluate_step(step, input, frame, step_index == steps.len() - 1)?;
+                }
             }
 
             // If any step results in undefined or an empty array, we can break out as
@@ -717,7 +752,8 @@ impl<'a> Evaluator<'a> {
                 break;
             }
 
-            input = result
+            input = result;
+            step_index += 1;
         }
 
         if is_tuple_stream {
@@ -781,6 +817,16 @@ impl<'a> Evaluator<'a> {
 
         let mut result: Vec<&'a Value<'a>> = Vec::new();
 
+        // Check if this step is a parent operator
+        if let AstKind::Parent = step.kind {
+            // For parent operator in path, we need to get the parent context from the frame
+            if let Some(parent) = frame.lookup("%") {
+                return Ok(parent);
+            } else {
+                return Ok(Value::undefined());
+            }
+        }
+
         // Evaluate the step on each member of the input
         for (item_index, item) in input.members().enumerate() {
             if let Some(ref index_var) = step.index {
@@ -835,6 +881,37 @@ impl<'a> Evaluator<'a> {
         tuple_bindings: &'a Value<'a>,
         frame: &Frame<'a>,
     ) -> Result<&'a Value<'a>> {
+        fn is_navigational_step(step: &Ast) -> bool {
+            match &step.kind {
+                AstKind::Name(..) | AstKind::Wildcard | AstKind::Descendent => true,
+                AstKind::Path(steps) => {
+                    if let Some(last) = steps.last() {
+                        is_navigational_step(last)
+                    } else {
+                        false
+                    }
+                }
+                AstKind::Block(exprs) => {
+                    if exprs.len() == 1 {
+                        is_navigational_step(&exprs[0])
+                    } else {
+                        false
+                    }
+                }
+                _ => false
+            }
+        }
+        if std::env::var("JSONATA_DEBUG_PARENT").ok().as_deref() == Some("1") {
+            let input_len_dbg = if input.is_array() { input.len() } else { 1 };
+            eprintln!(
+                "[tuple_step] char={} kind={:?} tuple_in={} input_len={} frame_has_%={}",
+                step.char_index,
+                step.kind,
+                !tuple_bindings.is_undefined(),
+                input_len_dbg,
+                frame.lookup("%").is_some()
+            );
+        }
         if let AstKind::Sort(ref sort_terms) = step.kind {
             let mut result = if tuple_bindings.is_undefined() {
                 let sorted = self.evaluate_sort(step.char_index, sort_terms, input, frame)?;
@@ -866,6 +943,12 @@ impl<'a> Evaluator<'a> {
             for member in input.members() {
                 let tuple = Value::object(self.arena);
                 tuple.insert("@", member);
+                // Seed parent reference from current frame if available; otherwise undefined
+                if let Some(parent) = frame.lookup("%") {
+                    tuple.insert("%", parent);
+                } else {
+                    tuple.insert("%", Value::undefined());
+                }
                 tuple_bindings.push(tuple);
             }
             tuple_bindings
@@ -904,6 +987,22 @@ impl<'a> Evaluator<'a> {
                             output_tuple
                                 .insert(index_var, Value::number(self.arena, binding_index as f64));
                         }
+                    }
+                    // Update parent reference only for navigational steps (e.g., Name, Wildcard, Descendent)
+                    // For computed steps (e.g., object constructors, functions), the result does not
+                    // derive from the current context as a child, so parent is not updated.
+                    if is_navigational_step(step) {
+                        output_tuple.insert("%", &tuple["@"]);
+                    } else if matches!(step.kind, AstKind::Parent) {
+                        // Move up: new parent is previous grandparent
+                        output_tuple.insert("%", &tuple["%"]);
+                    } // else: keep existing % copied from tuple
+                    if std::env::var("JSONATA_DEBUG_PARENT").ok().as_deref() == Some("1") {
+                        eprintln!(
+                            "[tuple_emit] @={:?} %={:?}",
+                            output_tuple.get_entry("@"),
+                            output_tuple.get_entry("%")
+                        );
                     }
                     result.push(output_tuple);
                 }
@@ -1252,7 +1351,12 @@ impl<'a> Evaluator<'a> {
             return Ok(Value::lambda(self.arena, &lambda_ast, input, frame.clone()));
         }
 
-        let evaluated_proc = self.evaluate(proc, input, frame)?;
+        let evaluated_proc = if matches!(proc.kind, AstKind::Parent) {
+            // Calling `%()` should be treated as invoking a non-function
+            Value::undefined()
+        } else {
+            self.evaluate(proc, input, frame)?
+        };
 
         // Help the user out if they forgot a '$'
         if evaluated_proc.is_undefined() {
