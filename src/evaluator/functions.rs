@@ -2020,6 +2020,71 @@ pub fn fn_base64_decode<'a>(
     Ok(Value::string(context.arena, &decoded))
 }
 
+/// Minimal stub for $formatInteger to satisfy undefined-argument behavior.
+/// Full formatting semantics (pictures, ordinals, roman numerals, words, spreadsheet columns)
+/// are not implemented yet.
+pub fn fn_format_integer<'a>(
+    context: FunctionContext<'a, '_>,
+    args: &[&'a Value<'a>],
+ ) -> Result<&'a Value<'a>> {
+    max_args!(context, args, 2);
+    let value = args.first().copied().unwrap_or_else(Value::undefined);
+    let picture = args.get(1).copied().unwrap_or_else(Value::undefined);
+
+    // If value is undefined, result is undefined (per tests)
+    if value.is_undefined() {
+        return Ok(Value::undefined());
+    }
+
+    // For now, enforce basic signature types
+    assert_arg!(picture.is_string(), context, 2);
+
+    // Minimal implementation for a subset of decimal digit patterns:
+    // - Supports patterns composed of '0' and '#' without separators
+    // - Zero pads on the left to the number of '0's in the pattern
+    // - Supports unicode decimal digit family if the picture contains a non-ASCII digit
+    if !value.is_number() {
+        return Err(Error::T0410ArgumentNotValid(context.char_index, 1, context.name.to_string()));
+    }
+    let mut n = value.as_f64().trunc() as i64;
+    let pic_full = picture.as_str();
+    let mut parts = pic_full.splitn(2, ';');
+    let pic = parts.next().unwrap_or("");
+    let modifier = parts.next().unwrap_or("");
+    let is_negative = n < 0;
+    if is_negative { n = -n; }
+
+    let digits = n.to_string();
+    let min_width = pic.chars().filter(|&c| c == '0').count();
+    let mut out = String::new();
+    if is_negative { out.push('-'); }
+    if digits.len() >= min_width {
+        out.push_str(&digits);
+    } else {
+        for _ in 0..(min_width - digits.len()) { out.push('0'); }
+        out.push_str(&digits);
+    }
+
+    // Ordinal suffix if requested via ;o
+    if modifier.contains('o') {
+        let n_abs = n % 100;
+        let suffix = if n_abs >= 11 && n_abs <= 13 {
+            "th"
+        } else {
+            match n % 10 {
+                1 => "st",
+                2 => "nd",
+                3 => "rd",
+                _ => "th",
+            }
+        };
+        out.push_str(suffix);
+    }
+
+    // NOTE: Unicode digit-family translation is intentionally not implemented now.
+    Ok(Value::string(context.arena, &out))
+}
+
 pub fn fn_round<'a>(
     context: FunctionContext<'a, '_>,
     args: &[&'a Value<'a>],

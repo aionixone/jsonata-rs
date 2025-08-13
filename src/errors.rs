@@ -65,6 +65,8 @@ pub enum Error {
     T1003NonStringKey(usize, String),
     T1005InvokedNonFunctionSuggest(usize, String),
     T1006InvokedNonFunction(usize),
+    T1007AttemptedPartialNonFunctionSuggest(usize, String),
+    T1008AttemptedPartialNonFunction(usize),
     T1010MatcherInvalid(String),
     T2001LeftSideNotNumber(usize, String),
     T2002RightSideNotNumber(usize, String),
@@ -162,6 +164,8 @@ impl Error {
             Error::T1003NonStringKey(..) => "T1003",
             Error::T1005InvokedNonFunctionSuggest(..) => "T1005",
             Error::T1006InvokedNonFunction(..) => "T1006",
+            Error::T1007AttemptedPartialNonFunctionSuggest(..) => "T1007",
+            Error::T1008AttemptedPartialNonFunction(..) => "T1008",
             Error::T1010MatcherInvalid(..) => "T1010",
             Error::T2001LeftSideNotNumber(..) => "T2001",
             Error::T2002RightSideNotNumber(..) => "T2002",
@@ -304,6 +308,10 @@ impl fmt::Display for Error {
                 write!(f, "{}: Attempted to invoke a non-function. Did you mean ${}?", p, t),
             T1006InvokedNonFunction(ref p) =>
                 write!(f, "{}: Attempted to invoke a non-function", p),
+            T1007AttemptedPartialNonFunctionSuggest(ref p, ref t) =>
+                write!(f, "{}: Attempted to partially apply a non-function. Did you mean ${}?", p, t),
+            T1008AttemptedPartialNonFunction(ref p) =>
+                write!(f, "{}: Attempted to partially apply a non-function", p),
             T1010MatcherInvalid(ref t) =>
                 write!(f, "The matcher function argument passed to function {} does not return the correct object structure", t),
             T2001LeftSideNotNumber(ref p, ref o) =>

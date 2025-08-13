@@ -1202,17 +1202,26 @@ impl<'a> Evaluator<'a> {
         // If this is a partial application with no pipeline/context value, return a lambda
         // that accepts a single argument and substitutes it into the placeholder positions.
         if is_partial && context.is_none() {
-            let param_name = "$x".to_string();
-            // Build parameter var AST
-            let param_var = Ast::new(AstKind::Var(param_name.clone()), proc.char_index);
-            // Replace PartialArg with param var
+            // If the proc resolves to undefined (unknown function name), error T1008
+            if let AstKind::Path(ref steps) = proc.kind {
+                if let AstKind::Name(ref name) = steps[0].kind {
+                    if frame.lookup(name).is_none() {
+                        return Err(Error::T1008AttemptedPartialNonFunction(proc.char_index));
+                    } else {
+                        // Disallow partial application using bare function names; require $-prefixed variables
+                        return Err(Error::T1007AttemptedPartialNonFunctionSuggest(proc.char_index, name.clone()));
+                    }
+                }
+            }
+            // Build parameter vars, one per placeholder in left-to-right order
+            let mut param_names: Vec<String> = Vec::new();
             let mut replaced_args: Vec<Ast> = Vec::with_capacity(args.len());
             for a in args.iter() {
                 if matches!(a.kind, AstKind::PartialArg) {
-                    replaced_args.push(Ast::new(
-                        AstKind::Var(param_name.clone()),
-                        a.char_index,
-                    ));
+                    let idx = param_names.len();
+                    let pname = format!("$x{}", idx + 1);
+                    param_names.push(pname.clone());
+                    replaced_args.push(Ast::new(AstKind::Var(pname), a.char_index));
                 } else {
                     replaced_args.push(a.clone());
                 }
@@ -1231,7 +1240,10 @@ impl<'a> Evaluator<'a> {
             let lambda_ast = Ast::new(
                 AstKind::Lambda {
                     name: String::from("<partial>"),
-                    args: vec![param_var],
+                    args: param_names
+                        .iter()
+                        .map(|n| Ast::new(AstKind::Var(n.clone()), proc.char_index))
+                        .collect(),
                     body: Box::new(inner_func),
                     thunk: false,
                 },
@@ -1251,6 +1263,9 @@ impl<'a> Evaluator<'a> {
                             proc.char_index,
                             name.clone(),
                         ));
+                    } else if is_partial {
+                        // Unknown function in partial application: T1007
+                        return Err(Error::T1007AttemptedPartialNonFunctionSuggest(proc.char_index, name.clone()));
                     }
                 }
             }
